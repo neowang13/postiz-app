@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  HttpException,
   Param,
   Post,
   Put,
@@ -42,6 +43,100 @@ export class IntegrationsController {
     private _postService: PostsService,
     private _refreshIntegrationService: RefreshIntegrationService
   ) {}
+
+  private isMetaProvider(identifier: string) {
+    return ['facebook', 'instagram', 'instagram-standalone'].includes(
+      identifier
+    );
+  }
+
+  private metaRevokeToken(integration: any) {
+    if (integration.providerIdentifier === 'instagram') {
+      const [, userToken] = String(integration.token || '').split('___');
+      return userToken || integration.refreshToken || integration.token;
+    }
+
+    return integration.refreshToken || integration.token;
+  }
+
+  private metaGraphPermissionsUrl(providerIdentifier: string, token: string) {
+    const encodedToken = encodeURIComponent(token);
+    if (
+      providerIdentifier === 'instagram-standalone' ||
+      String(token || '').startsWith('IG')
+    ) {
+      return `https://graph.instagram.com/me/permissions?access_token=${encodedToken}`;
+    }
+
+    return `https://graph.facebook.com/v20.0/me/permissions?access_token=${encodedToken}`;
+  }
+
+  private async revokeMetaAuthorization(integration: any) {
+    if (!this.isMetaProvider(integration.providerIdentifier)) {
+      throw new HttpException(
+        'Confirmed disconnect is only supported for Meta integrations',
+        400
+      );
+    }
+
+    const token = this.metaRevokeToken(integration);
+    if (!token) {
+      throw new HttpException(
+        'Meta authorization token is not available for this integration',
+        502
+      );
+    }
+
+    const response = await fetch(
+      this.metaGraphPermissionsUrl(integration.providerIdentifier, token),
+      {
+        method: 'DELETE',
+        headers: {
+          accept: 'application/json',
+        },
+      }
+    );
+    const text = await response.text();
+    let payload: any = null;
+    if (text) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = text;
+      }
+    }
+
+    if (!response.ok || payload?.success === false) {
+      const message =
+        payload?.error?.message ||
+        payload?.message ||
+        `Meta authorization revoke failed with HTTP ${response.status}`;
+      throw new HttpException(message, response.status || 502);
+    }
+
+    return payload || { success: true };
+  }
+
+  private async getSharedMetaAuthorizationIntegrations(
+    organizationId: string,
+    integration: any
+  ) {
+    const token = this.metaRevokeToken(integration);
+    if (!token) {
+      return [];
+    }
+
+    const activeIntegrations = await this._integrationService.getIntegrationsList(
+      organizationId
+    );
+    return activeIntegrations.filter(
+      (item: any) =>
+        item.id !== integration.id &&
+        !item.deletedAt &&
+        this.isMetaProvider(item.providerIdentifier) &&
+        this.metaRevokeToken(item) === token
+    );
+  }
 
   @Post('/provider/:id/connect')
   @CheckPolicies([AuthorizationActions.Create, Sections.CHANNEL])
@@ -397,6 +492,75 @@ export class IntegrationsController {
       org?.subscription?.totalChannels || pricing.FREE.channel,
       id
     );
+  }
+
+  @Delete('/confirmed-disconnect')
+  async confirmedDisconnectChannel(
+    @GetOrgFromRequest() org: Organization,
+    @Body('id') bodyId: string,
+    @Query('id') queryId: string
+  ) {
+    const id = bodyId || queryId;
+    if (!id) {
+      throw new HttpException('Integration id is required', 400);
+    }
+
+    const integration = await this._integrationService.getIntegrationById(
+      org.id,
+      id
+    );
+    if (!integration || integration.deletedAt) {
+      throw new HttpException('Integration not found', 404);
+    }
+
+    const sharingIntegrations =
+      await this.getSharedMetaAuthorizationIntegrations(org.id, integration);
+    const metaRevocationSkipped = sharingIntegrations.length > 0;
+    const meta = metaRevocationSkipped
+      ? {
+          skipped: true,
+          reason:
+            'Meta authorization is still used by other connected integrations',
+          integrations: sharingIntegrations.map((item: any) => ({
+            id: item.id,
+            providerIdentifier: item.providerIdentifier,
+            name: item.name,
+          })),
+        }
+      : await this.revokeMetaAuthorization(integration);
+
+    const isTherePosts = await this._integrationService.getPostsForChannel(
+      org.id,
+      id
+    );
+    if (isTherePosts.length) {
+      for (const post of isTherePosts) {
+        this._postService.deletePost(org.id, post.group).catch((err) => {});
+      }
+    }
+
+    const deleted = await this._integrationService.deleteChannel(org.id, id);
+    const stillListed = (await this._integrationService.getIntegrationsList(
+      org.id
+    )).some((item) => item.id === id);
+    if (stillListed) {
+      throw new HttpException(
+        'Integration is still present after delete',
+        502
+      );
+    }
+
+    return {
+      ok: true,
+      metaRevoked: !metaRevocationSkipped,
+      metaRevocationSkipped,
+      integrationDeleted: true,
+      meta,
+      integration: {
+        id: deleted.id,
+        deletedAt: deleted.deletedAt,
+      },
+    };
   }
 
   @Delete('/')
