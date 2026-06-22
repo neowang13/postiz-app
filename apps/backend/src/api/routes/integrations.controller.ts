@@ -117,6 +117,17 @@ export class IntegrationsController {
     return payload || { success: true };
   }
 
+  private isUnsupportedMetaRevokeError(error: any) {
+    const message = String(
+      error?.message || error?.response?.message || ''
+    ).toLowerCase();
+    return (
+      message.includes("object with id 'me' does not exist") ||
+      message.includes('missing permissions') ||
+      message.includes('does not support this operation')
+    );
+  }
+
   private async getSharedMetaAuthorizationIntegrations(
     organizationId: string,
     integration: any
@@ -515,8 +526,8 @@ export class IntegrationsController {
 
     const sharingIntegrations =
       await this.getSharedMetaAuthorizationIntegrations(org.id, integration);
-    const metaRevocationSkipped = sharingIntegrations.length > 0;
-    const meta = metaRevocationSkipped
+    let metaRevocationSkipped = sharingIntegrations.length > 0;
+    let meta: any = metaRevocationSkipped
       ? {
           skipped: true,
           reason:
@@ -527,7 +538,28 @@ export class IntegrationsController {
             name: item.name,
           })),
         }
-      : await this.revokeMetaAuthorization(integration);
+      : null;
+
+    if (!metaRevocationSkipped) {
+      try {
+        meta = await this.revokeMetaAuthorization(integration);
+      } catch (err: any) {
+        if (
+          integration.providerIdentifier === 'instagram-standalone' &&
+          this.isUnsupportedMetaRevokeError(err)
+        ) {
+          metaRevocationSkipped = true;
+          meta = {
+            skipped: true,
+            reason:
+              'Meta authorization revoke is not supported for this Instagram token',
+            message: err?.message || 'Meta authorization revoke failed',
+          };
+        } else {
+          throw err;
+        }
+      }
+    }
 
     const isTherePosts = await this._integrationService.getPostsForChannel(
       org.id,
