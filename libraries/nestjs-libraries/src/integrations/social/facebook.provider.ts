@@ -25,7 +25,7 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
   identifier = 'facebook';
   name = 'Facebook Page';
   isBetweenSteps = true;
-  scopes = [
+  private readonly connectScopes = [
     'pages_show_list',
     'business_management',
     'pages_manage_posts',
@@ -33,8 +33,11 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     'pages_manage_metadata',
     'pages_read_user_content',
     'pages_read_engagement',
-    'read_insights',
     'pages_messaging',
+  ];
+  scopes = [
+    ...this.connectScopes,
+    'read_insights',
   ];
   override maxConcurrentJob = 500; // Facebook has reasonable rate limits
   editor = 'normal' as const;
@@ -258,6 +261,8 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
       state,
       response_type: 'code',
       scope: this.scopes.join(','),
+      auth_type: 'rerequest',
+      return_scopes: 'true',
     });
 
     return {
@@ -323,7 +328,9 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     const permissions = data
       .filter((d: any) => d.status === 'granted')
       .map((p: any) => p.permission);
-    this.checkScopes(this.scopes, permissions);
+    // `read_insights` is needed for analytics, but Meta may not grant it on
+    // reconnect even when the Page can still post, sync messages, and sync comments.
+    this.checkScopes(this.connectScopes, permissions);
 
     const { id, name, picture } = await (
       await fetch(
