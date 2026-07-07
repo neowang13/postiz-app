@@ -32,6 +32,7 @@ export class InstagramStandaloneProvider
     'instagram_business_basic',
     'instagram_business_content_publish',
     'instagram_business_manage_comments',
+    'instagram_business_manage_messages',
     'instagram_business_manage_insights',
   ];
     override maxConcurrentJob = 200; // Instagram standalone has stricter limits
@@ -40,6 +41,48 @@ export class InstagramStandaloneProvider
   editor = 'normal' as const;
   maxLength() {
     return 2200;
+  }
+
+  private async fetchOwnProfile(
+    accessToken: string,
+    fallbackId: string | number | undefined
+  ) {
+    const normalizedId = String(fallbackId || '').trim();
+    const endpoints = [
+      `https://graph.instagram.com/me?fields=id,user_id,username,name,profile_picture_url,account_type&access_token=${encodeURIComponent(
+        accessToken
+      )}`,
+      normalizedId
+        ? `https://graph.instagram.com/${encodeURIComponent(
+            normalizedId
+          )}?fields=id,user_id,username,name,profile_picture_url,account_type&access_token=${encodeURIComponent(
+            accessToken
+          )}`
+        : '',
+      normalizedId
+        ? `https://graph.instagram.com/v21.0/${encodeURIComponent(
+            normalizedId
+          )}?fields=id,user_id,username,name,profile_picture_url,account_type&access_token=${encodeURIComponent(
+            accessToken
+          )}`
+        : '',
+    ].filter(Boolean);
+
+    for (const endpoint of endpoints) {
+      try {
+        const response = await fetch(endpoint);
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || !payload || payload.error) {
+          continue;
+        }
+
+        return payload;
+      } catch {
+        continue;
+      }
+    }
+
+    return null;
   }
 
   override async checkValidity(
@@ -79,24 +122,19 @@ export class InstagramStandaloneProvider
       )
     ).json();
 
-    const {
-      user_id,
-      name,
-      username,
-      profile_picture_url = '',
-    } = await (
-      await fetch(
-        `https://graph.instagram.com/v21.0/me?fields=user_id,username,name,profile_picture_url&access_token=${access_token}`
-      )
-    ).json();
+    const profile = await this.fetchOwnProfile(access_token, undefined);
+    const resolvedId = profile?.id || profile?.user_id || '';
+    const username = profile?.username || '';
+    const name = profile?.name || username || `Channel_${String(resolvedId).slice(0, 8)}`;
+    const profilePictureUrl = profile?.profile_picture_url || '';
 
     return {
-      id: user_id,
+      id: resolvedId,
       name,
       accessToken: access_token,
       refreshToken: access_token,
       expiresIn: dayjs().add(58, 'days').unix() - dayjs().unix(),
-      picture: profile_picture_url || '',
+      picture: profilePictureUrl,
       username,
     };
   }
@@ -147,31 +185,42 @@ export class InstagramStandaloneProvider
       })
     ).json();
 
-    const { access_token, expires_in, ...all } = await (
-      await fetch(
-        'https://graph.instagram.com/access_token' +
-          '?grant_type=ig_exchange_token' +
-          `&client_id=${process.env.INSTAGRAM_APP_ID}` +
-          `&client_secret=${process.env.INSTAGRAM_APP_SECRET}` +
-          `&access_token=${getAccessToken.access_token}`
-      )
-    ).json();
+    let longLivedAccessToken = '';
+    try {
+      const exchangeUrl = `https://graph.instagram.com/access_token?grant_type=ig_exchange_token&client_secret=${encodeURIComponent(
+        process.env.INSTAGRAM_APP_SECRET!
+      )}&access_token=${encodeURIComponent(getAccessToken.access_token)}`;
+      const exchangeResponse = await fetch(exchangeUrl);
+      const exchangePayload = await exchangeResponse.json().catch(() => null);
+      if (exchangeResponse.ok && exchangePayload?.access_token) {
+        longLivedAccessToken = exchangePayload.access_token;
+      }
+    } catch {
+      longLivedAccessToken = '';
+    }
+
+    const accessToken = longLivedAccessToken || getAccessToken.access_token;
 
     this.checkScopes(this.scopes, getAccessToken.permissions);
 
-    const { user_id, name, username, profile_picture_url } = await (
-      await fetch(
-        `https://graph.instagram.com/v21.0/me?fields=user_id,username,name,profile_picture_url&access_token=${access_token}`
-      )
-    ).json();
+    const profile = await this.fetchOwnProfile(
+      accessToken,
+      getAccessToken.user_id
+    );
+    const resolvedId =
+      profile?.id || profile?.user_id || getAccessToken.user_id || '';
+    const username = profile?.username || '';
+    const name =
+      profile?.name || username || `Channel_${String(resolvedId).slice(0, 8)}`;
+    const profilePictureUrl = profile?.profile_picture_url || '';
 
     return {
-      id: user_id,
+      id: resolvedId,
       name,
-      accessToken: access_token,
-      refreshToken: access_token,
+      accessToken,
+      refreshToken: accessToken,
       expiresIn: dayjs().add(58, 'days').unix() - dayjs().unix(),
-      picture: profile_picture_url,
+      picture: profilePictureUrl,
       username,
     };
   }
