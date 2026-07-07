@@ -30,8 +30,11 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     'business_management',
     'pages_manage_posts',
     'pages_manage_engagement',
+    'pages_manage_metadata',
+    'pages_read_user_content',
     'pages_read_engagement',
     'read_insights',
+    'pages_messaging',
   ];
   override maxConcurrentJob = 500; // Facebook has reasonable rate limits
   editor = 'normal' as const;
@@ -73,6 +76,22 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
       return {
         type: 'refresh-token' as const,
         value: 'Access token has been revoked, please re-authenticate',
+      };
+    }
+
+    if (body.indexOf('read_insights') > -1) {
+      return {
+        type: 'bad-body' as const,
+        value:
+          'Facebook analytics requires the read_insights permission. Reconnect this Page after the provider requests that scope.',
+      };
+    }
+
+    if (body.indexOf('100 or more likes') > -1) {
+      return {
+        type: 'bad-body' as const,
+        value:
+          'Facebook Page insights are only available for Pages with 100 or more likes.',
       };
     }
 
@@ -232,15 +251,17 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
 
   async generateAuthUrl() {
     const state = makeId(6);
+    const redirectUri = `${process.env.FRONTEND_URL}/integrations/social/facebook`;
+    const query = new URLSearchParams({
+      client_id: process.env.FACEBOOK_APP_ID!,
+      redirect_uri: redirectUri,
+      state,
+      response_type: 'code',
+      scope: this.scopes.join(','),
+    });
+
     return {
-      url:
-        'https://www.facebook.com/v20.0/dialog/oauth' +
-        `?client_id=${process.env.FACEBOOK_APP_ID}` +
-        `&redirect_uri=${encodeURIComponent(
-          `${process.env.FRONTEND_URL}/integrations/social/facebook`
-        )}` +
-        `&state=${state}` +
-        `&scope=${this.scopes.join(',')}`,
+      url: `https://www.facebook.com/v20.0/dialog/oauth?${query.toString()}`,
       codeVerifier: makeId(10),
       state,
     };
@@ -701,8 +722,10 @@ export class FacebookProvider extends SocialAbstract implements SocialProvider {
     //   - page_total_media_view_unique: total unique views on the page's media (reach)
     //   - page_media_view: total media views, broken down between paid and organic
     const { data } = await (
-      await fetch(
-        `https://graph.facebook.com/v23.0/${id}/insights?metric=page_total_media_view_unique,page_media_view,page_post_engagements,page_daily_follows&access_token=${accessToken}&period=day&since=${since}&until=${until}`
+      await this.fetch(
+        `https://graph.facebook.com/v23.0/${id}/insights?metric=page_total_media_view_unique,page_media_view,page_post_engagements,page_daily_follows&access_token=${accessToken}&period=day&since=${since}&until=${until}`,
+        {},
+        'facebook page analytics'
       )
     ).json();
 
