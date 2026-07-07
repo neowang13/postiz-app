@@ -43,6 +43,13 @@ export class InstagramStandaloneProvider
     return 2200;
   }
 
+  private resolvedInstagramUserId(
+    profile: { id?: string | number; user_id?: string | number } | null | undefined,
+    fallbackId: string | number | undefined = ''
+  ) {
+    return String(profile?.user_id || profile?.id || fallbackId || '').trim();
+  }
+
   private async fetchOwnProfile(
     accessToken: string,
     fallbackId: string | number | undefined
@@ -123,7 +130,7 @@ export class InstagramStandaloneProvider
     ).json();
 
     const profile = await this.fetchOwnProfile(access_token, undefined);
-    const resolvedId = profile?.id || profile?.user_id || '';
+    const resolvedId = this.resolvedInstagramUserId(profile);
     const username = profile?.username || '';
     const name = profile?.name || username || `Channel_${String(resolvedId).slice(0, 8)}`;
     const profilePictureUrl = profile?.profile_picture_url || '';
@@ -207,8 +214,10 @@ export class InstagramStandaloneProvider
       accessToken,
       getAccessToken.user_id
     );
-    const resolvedId =
-      profile?.id || profile?.user_id || getAccessToken.user_id || '';
+    const resolvedId = this.resolvedInstagramUserId(
+      profile,
+      getAccessToken.user_id
+    );
     const username = profile?.username || '';
     const name =
       profile?.name || username || `Channel_${String(resolvedId).slice(0, 8)}`;
@@ -260,8 +269,10 @@ export class InstagramStandaloneProvider
   }
 
   async analytics(id: string, accessToken: string, date: number) {
+    const profile = await this.fetchOwnProfile(accessToken, id);
+    const analyticsId = this.resolvedInstagramUserId(profile, id);
     return instagramProvider.analytics(
-      id,
+      analyticsId,
       accessToken,
       date,
       'graph.instagram.com'
